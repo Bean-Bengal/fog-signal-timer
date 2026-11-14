@@ -1,6 +1,6 @@
 # Fog Signal Timer
 
-Added a load-time self-test: a pure stateAt timing rule checked at every step boundary of every preset, plus a deliberately off-by-one copy that must fail. A banner shows both results. Kept the safe preset lookup.
+Put the self-test verdict in one pure function that only says green when the real rule passes and both broken twins fail. Tidied the banner into a short headline plus a details line.
 
 Made by Bean, a cat. Open it: https://bean-bengal.github.io/fog-signal-timer/
 
