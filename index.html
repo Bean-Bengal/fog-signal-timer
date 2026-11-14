@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fog Signal Timer</title>
+<style>
+  :root { --bg:#14201c; --ink:#e9efe6; --dim:#9fb3a7; --accent:#f2c14e; --line:#2f4a3f; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px 48px; background:var(--bg); color:var(--ink);
+         font-family: Georgia, "Times New Roman", serif; line-height:1.45; }
+  main { max-width:620px; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  .sub { color:var(--dim); margin:0 0 22px; }
+  label { display:block; margin:0 0 6px; }
+  select, button { font:inherit; color:var(--ink); background:#1f332b; border:2px solid var(--line);
+         border-radius:8px; padding:10px 14px; }
+  select { width:100%; }
+  button { cursor:pointer; min-width:110px; min-height:44px; }
+  button:hover { border-color:var(--dim); }
+  button:active { background:#2a463a; }
+  :focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  .row { display:flex; flex-wrap:wrap; gap:14px 22px; align-items:center; margin:16px 0; }
+  .check { display:flex; align-items:center; gap:8px; margin:0; }
+  .check input { width:20px; height:20px; accent-color:var(--accent); }
+  .stage { display:flex; gap:18px; align-items:center; margin:22px 0 14px; }
+  #square { width:120px; height:120px; border-radius:6px; background:#0b110f; border:2px solid var(--line); flex:none; }
+  #square.on { background:#fff; border-color:#fff; }
+  #square.muted { opacity:.25; }
+  .readout { flex:1; min-width:0; }
+  .readout strong { display:block; font-size:1.15rem; }
+  #strip { display:flex; height:26px; border:2px solid var(--line); border-radius:6px; overflow:hidden; position:relative; background:#0b110f; }
+  #strip .seg { min-width:3px; }
+  #strip .seg.on { background:var(--accent); }
+  #strip .seg.off { background:transparent; }
+  #marker { position:absolute; top:0; bottom:0; width:3px; background:#fff; left:0; display:none; }
+  .scale { display:flex; justify-content:space-between; color:var(--dim); font-size:.85rem; margin-top:4px; }
+  #note { margin-top:20px; padding:10px 12px; border-left:4px solid var(--accent); background:#1a2a24; }
+  .small { color:var(--dim); font-size:.9rem; margin-top:26px; }
+  #selftest { margin:0 0 18px; padding:10px 12px; border-radius:6px; border:2px solid var(--line); font-size:.92rem; overflow-wrap:anywhere; }
+  #selftest.pass { border-color:#58b37a; background:#18301f; }
+  #selftest.fail { border-color:#e0674f; background:#3a1b16; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Fog Signal Timer</h1>
+  <p class="sub">Pick a timing. Hear it, watch it, or both, and see which one tells you more.</p>
+
+  <div id="selftest" role="status">Self-test running...</div>
+
+  <label for="preset">Signal pattern</label>
+  <select id="preset"></select>
+
+  <div class="row">
+    <button id="go" type="button">Play</button>
+    <label class="check"><input type="checkbox" id="soundOn" checked> Sound</label>
+    <label class="check"><input type="checkbox" id="flashOn" checked> Flash</label>
+  </div>
+
+  <div class="stage">
+    <div id="square" aria-hidden="true"></div>
+    <div class="readout">
+      <strong id="what">Stopped</strong>
+      <span id="detail">Press Play to start.</span>
+    </div>
+  </div>
+
+  <div id="strip" aria-hidden="true"></div>
+  <div class="scale" aria-hidden="true"><span>0 s</span><span id="total"></span></div>
+
+  <div id="note" role="status" aria-live="polite"></div>
+
+  <p class="small">The strip is one full cycle: gold is a blast, dark is silence. The white line is where you are in it. Square flashes are slow, well under three a second.</p>
+</main>
+
+<script>
+(function () {
+// Presets: plain data. Each is a list of [on, ms] pairs; 1 = blast, 0 = silence.
+var PRESETS = {
+  "one-30":   { label: "One prolonged blast every 30 seconds",
+                steps: [[1, 2000], [0, 28000]] },
+  "two-60":   { label: "Two prolonged blasts every 60 seconds",
+                steps: [[1, 2000], [0, 3000], [1, 2000], [0, 53000]] },
+  "one-120":  { label: "One prolonged blast every 2 minutes",
+                steps: [[1, 5000], [0, 115000]] },
+  "short-20": { label: "One short blast every 20 seconds",
+                steps: [[1, 1000], [0, 19000]] },
+  "three-60": { label: "Three short blasts every 60 seconds",
+                steps: [[1, 1000], [0, 2000], [1, 1000], [0, 2000], [1, 1000], [0, 53000]] },
+  "quick-5":  { label: "Practice: one blast every 5 seconds",
+                steps: [[1, 1000], [0, 4000]] }
+};
+var KEYS = Object.keys(PRESETS);
+
+var $ = function (id) { return document.getElementById(id); };
+var select = $("preset"), go = $("go"), square = $("square"), strip = $("strip");
+var what = $("what"), detail = $("detail"), note = $("note"), totalEl = $("total");
+var soundOn = $("soundOn"), flashOn = $("flashOn"), selftestEl = $("selftest");
+
+// The one walker. It only knows its steps.
+var walker = { steps: [], i: 0, timer: null, stepStart: 0, playing: false, offset: 0 };
+var marker = document.createElement("div");
+marker.id = "marker";
+var lastState = "";
+var audio = null;
+
+// One safe lookup: never trust the raw dropdown value.
+function currentKey() {
+  if (!PRESETS[select.value]) select.value = KEYS[0];
+  return PRESETS[select.value] ? select.value : KEYS[0];
+}
+function currentPreset() { return PRESETS[currentKey()]; }
+
+function fmt(ms) {
+  var s = ms / 1000;
+  if (s >= 60) { var m = Math.floor(s / 60), r = s - m * 60; return m + " min" + (r ? " " + r + " s" : ""); }
+  return s + " s";
+}
+function sumMs(steps) { return steps.reduce(function (a, s) { return a + s[1]; }, 0); }
+function cycleMs() { return sumMs(walker.steps) || 1; }
+
+// ---- The timing rule, as pure functions ----
+// stateAt: at t ms into the signal, is it a blast (1) or silence (0)?
+// A step owns [start, start + ms): its end moment belongs to the next step.
+function stateAt(steps, t) {
+  var total = sumMs(steps);
+  var x = ((t % total) + total) % total;
+  var start = 0;
+  for (var i = 0; i < steps.length; i++) {
+    if (x >= start && x < start + steps[i][1]) return steps[i][0];
+    start += steps[i][1];
+  }
+  return steps[0][0];
+}
+// Deliberately wrong copy: the end moment still belongs to the old step (off by one).
+function stateAtBroken(steps, t) {
+  var total = sumMs(steps);
+  var x = ((t % total) + total) % total;
+  var start = 0;
+  for (var i = 0; i < steps.length; i++) {
+    if (x >= start && x <= start + steps[i][1]) return steps[i][0];
+    start += steps[i][1];
+  }
+  return steps[0][0];
+}
+// Same checks for any version: both sides of every step boundary in every preset.
+function runChecks(fn) {
+  var fails = [], count = 0;
+  function expect(name, got, want) {
+    count++;
+    if (got !== want) fails.push(name + " got " + got + " want " + want);
+  }
+  KEYS.forEach(function (key) {
+    var steps = PRESETS[key].steps, start = 0, n = steps.length;
+    steps.forEach(function (s, i) {
+      var prev = steps[(i + n - 1) % n][0];
+      expect(key + " step" + i + " start", fn(steps, start), s[0]);
+      expect(key + " step" + i + " 1ms before start", fn(steps, start - 1), prev);
+      expect(key + " step" + i + " last ms", fn(steps, start + s[1] - 1), s[0]);
+      start += s[1];
+    });
+    expect(key + " wraps to step0", fn(steps, start), steps[0][0]);
+  });
+  // Hand-worked: one-30 is a blast for 0..1999 ms, silent from 2000.
+  var one = PRESETS["one-30"].steps;
+  expect("one-30 at 1999", fn(one, 1999), 1);
+  expect("one-30 at 2000", fn(one, 2000), 0);
+  expect("one-30 at 30000", fn(one, 30000), 1);
+  return { fails: fails, count: count };
+}
+function selfTest() {
+  var problems = [];
+  var cycles = { "one-30":30000, "two-60":60000, "one-120":120000, "short-20":20000, "three-60":60000, "quick-5":5000 };
+  KEYS.forEach(function (k) {
+    if (sumMs(PRESETS[k].steps) !== cycles[k]) problems.push(k + " cycle is " + sumMs(PRESETS[k].steps) + " ms, expected " + cycles[k]);
+  });
+  var real = runChecks(stateAt);
+  var broken = runChecks(stateAtBroken);
+  real.fails.slice(0, 3).forEach(function (f) { problems.push("real rule: " + f); });
+  if (broken.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every check");
+  var ok = problems.length === 0;
+  selftestEl.className = ok ? "pass" : "fail";
+  selftestEl.textContent = ok
+    ? "Self-test PASS: real rule passed " + real.count + " of " + real.count + " checks. The off-by-one copy failed " + broken.fails.length + " of " + broken.count + ", so the checker can catch a bug."
+    : "Self-test FAIL: " + problems.join("; ");
+  return ok;
+}
+
+function announce(key, text) {      // say it once: only when the state changes
+  if (key === lastState) return;
+  lastState = key;
+  note.textContent = text;
+}
+
+function buildStrip() {
+  strip.innerHTML = "";
+  walker.steps.forEach(function (s) {
+    var d = document.createElement("div");
+    d.className = "seg " + (s[0] ? "on" : "off");
+    d.style.flexGrow = s[1];
+    d.style.flexBasis = "0";
+    strip.appendChild(d);
+  });
+  strip.appendChild(marker);
+  totalEl.textContent = fmt(cycleMs());
+}
+
+function ensureAudio() {
+  if (audio) { if (audio.ctx.state === "suspended") audio.ctx.resume(); return; }
+  var Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  var ctx = new Ctx();
+  var gain = ctx.createGain(); gain.gain.value = 0;
+  var lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 700;
+  var a = ctx.createOscillator(); a.type = "sawtooth"; a.frequency.value = 110;
+  var b = ctx.createOscillator(); b.type = "square"; b.frequency.value = 164;
+  var bg = ctx.createGain(); bg.gain.value = 0.3;
+  a.connect(lp); b.connect(bg); bg.connect(lp);
+  lp.connect(gain); gain.connect(ctx.destination);
+  a.start(); b.start();
+  audio = { ctx: ctx, gain: gain };
+}
+function tone(on) {
+  if (!audio) return;
+  var t = audio.ctx.currentTime, g = audio.gain.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(on && soundOn.checked ? 0.22 : 0, t + (on ? 0.08 : 0.15));
+}
+
+function show(on) {
+  square.classList.toggle("on", !!on && flashOn.checked);
+  square.classList.toggle("muted", !flashOn.checked);
+  tone(on);
+}
+
+function runStep() {
+  if (!walker.steps.length) return;
+  var s = walker.steps[walker.i];
+  walker.stepStart = performance.now();
+  var before = 0, k;
+  for (k = 0; k < walker.i; k++) before += walker.steps[k][1];
+  walker.offset = before;
+  show(s[0]);
+  var blasts = walker.steps.filter(function (x) { return x[0]; }).length;
+  var n = 0;
+  for (k = 0; k <= walker.i; k++) if (walker.steps[k][0]) n++;
+  if (s[0]) {
+    what.textContent = "Blast " + n + " of " + blasts;
+  } else {
+    what.textContent = "Silence";
+  }
+  detail.textContent = "Lasts " + fmt(s[1]) + ".";
+  walker.timer = setTimeout(function () {
+    walker.i = (walker.i + 1) % walker.steps.length;
+    runStep();
+  }, s[1]);
+}
+
+function start() {
+  stop(true);
+  if (!walker.steps.length) loadPreset();
+  ensureAudio();
+  walker.playing = true;
+  walker.i = 0;
+  marker.style.display = "block";
+  go.textContent = "Stop";
+  runStep();
+  requestAnimationFrame(frame);
+  announce("play:" + currentKey(), "Playing: " + currentPreset().label + ".");
+}
+function stop(quiet) {
+  clearTimeout(walker.timer);
+  walker.playing = false;
+  show(0);
+  marker.style.display = "none";
+  go.textContent = "Play";
+  if (!quiet) {
+    what.textContent = "Stopped";
+    detail.textContent = "Press Play to start.";
+    announce("stop:" + currentKey(), "Stopped.");
+  }
+}
+
+function frame() {
+  if (!walker.playing) return;
+  var el = walker.offset + (performance.now() - walker.stepStart);
+  marker.style.left = Math.min(100, el / cycleMs() * 100) + "%";
+  requestAnimationFrame(frame);
+}
+
+// Copy the chosen preset's list into the walker and redraw the strip.
+function loadPreset() {
+  var p = currentPreset();
+  walker.steps = p.steps.map(function (s) { return [s[0], s[1]]; });
+  walker.i = 0;
+  buildStrip();
+  return p;
+}
+
+// Choosing a preset: copy its list into the walker, restart if it was running.
+function choose() {
+  var p = loadPreset();
+  if (walker.playing) start();
+  else announce("pick:" + currentKey(), "Selected: " + p.label + ". Cycle is " + fmt(cycleMs()) + ".");
+}
+
+KEYS.forEach(function (key) {
+  var o = document.createElement("option");
+  o.value = key; o.textContent = PRESETS[key].label;
+  select.appendChild(o);
+});
+select.value = KEYS[0];
+select.addEventListener("change", choose);
+go.addEventListener("click", function () { if (walker.playing) stop(); else start(); });
+soundOn.addEventListener("change", function () {
+  if (walker.playing && walker.steps[walker.i]) tone(walker.steps[walker.i][0]);
+  announce("sound:" + soundOn.checked, soundOn.checked ? "Sound on." : "Sound off.");
+});
+flashOn.addEventListener("change", function () {
+  if (walker.playing && walker.steps[walker.i]) show(walker.steps[walker.i][0]); else show(0);
+  announce("flash:" + flashOn.checked, flashOn.checked ? "Flash on." : "Flash off.");
+});
+
+try { selfTest(); } catch (e) {
+  selftestEl.className = "fail";
+  selftestEl.textContent = "Self-test FAIL: it crashed: " + e.message;
+}
+choose();
+})();
+</script>
+</body>
+</html>
