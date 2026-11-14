@@ -37,7 +37,9 @@
   .scale { display:flex; justify-content:space-between; color:var(--dim); font-size:.85rem; margin-top:4px; }
   #note { margin-top:20px; padding:10px 12px; border-left:4px solid var(--accent); background:#1a2a24; }
   .small { color:var(--dim); font-size:.9rem; margin-top:26px; }
-  #selftest { margin:0 0 18px; padding:10px 12px; border-radius:6px; border:2px solid var(--line); font-size:.92rem; overflow-wrap:anywhere; }
+  #selftest { margin:0 0 18px; padding:8px 12px; border-radius:6px; border:2px solid var(--line); font-size:.92rem; overflow-wrap:anywhere; }
+  #selftest b { display:block; }
+  #selftest span { color:var(--dim); font-size:.82rem; }
   #selftest.pass { border-color:#58b37a; background:#18301f; }
   #selftest.fail { border-color:#e0674f; background:#3a1b16; }
 </style>
@@ -76,7 +78,6 @@
 
 <script>
 (function () {
-// Presets: plain data. Each is a list of [on, ms] pairs; 1 = blast, 0 = silence.
 var PRESETS = {
   "one-30":   { label: "One prolonged blast every 30 seconds",
                 steps: [[1, 2000], [0, 28000]] },
@@ -98,14 +99,12 @@ var select = $("preset"), go = $("go"), square = $("square"), strip = $("strip")
 var what = $("what"), detail = $("detail"), note = $("note"), totalEl = $("total");
 var soundOn = $("soundOn"), flashOn = $("flashOn"), selftestEl = $("selftest");
 
-// The one walker. It only knows its steps.
 var walker = { steps: [], i: 0, timer: null, stepStart: 0, playing: false, offset: 0 };
 var marker = document.createElement("div");
 marker.id = "marker";
 var lastState = "";
 var audio = null;
 
-// One safe lookup: never trust the raw dropdown value.
 function currentKey() {
   if (!PRESETS[select.value]) select.value = KEYS[0];
   return PRESETS[select.value] ? select.value : KEYS[0];
@@ -121,8 +120,6 @@ function sumMs(steps) { return steps.reduce(function (a, s) { return a + s[1]; }
 function cycleMs() { return sumMs(walker.steps) || 1; }
 
 // ---- The timing rule, as pure functions ----
-// stateAt: at t ms into the signal, is it a blast (1) or silence (0)?
-// A step owns [start, start + ms): its end moment belongs to the next step.
 function stateAt(steps, t) {
   var total = sumMs(steps);
   var x = ((t % total) + total) % total;
@@ -133,7 +130,6 @@ function stateAt(steps, t) {
   }
   return steps[0][0];
 }
-// Deliberately wrong copy: the end moment still belongs to the old step (off by one).
 function stateAtBroken(steps, t) {
   var total = sumMs(steps);
   var x = ((t % total) + total) % total;
@@ -144,7 +140,16 @@ function stateAtBroken(steps, t) {
   }
   return steps[0][0];
 }
-// Same checks for any version: both sides of every step boundary in every preset.
+function stateAtNeverStops(steps, t) {
+  var total = sumMs(steps);
+  var x = ((t % total) + total) % total;
+  var start = 0;
+  for (var i = 0; i < steps.length; i++) {
+    if (x >= start && x < start + steps[i][1]) return steps[i][0] || 1;
+    start += steps[i][1];
+  }
+  return 1;
+}
 function runChecks(fn) {
   var fails = [], count = 0;
   function expect(name, got, want) {
@@ -162,32 +167,81 @@ function runChecks(fn) {
     });
     expect(key + " wraps to step0", fn(steps, start), steps[0][0]);
   });
-  // Hand-worked: one-30 is a blast for 0..1999 ms, silent from 2000.
   var one = PRESETS["one-30"].steps;
   expect("one-30 at 1999", fn(one, 1999), 1);
   expect("one-30 at 2000", fn(one, 2000), 0);
   expect("one-30 at 30000", fn(one, 30000), 1);
   return { fails: fails, count: count };
 }
-function selfTest() {
+function runStopChecks(fn) {
+  var fails = [], count = 0;
+  function expect(name, got, want) {
+    count++;
+    if (got !== want) fails.push(name + " got " + got + " want " + want);
+  }
+  KEYS.forEach(function (key) {
+    var steps = PRESETS[key].steps, start = 0;
+    steps.forEach(function (s, i) {
+      if (s[0] === 1) {
+        var end = start + s[1];
+        expect(key + " blast" + i + " still on 1ms before stop", fn(steps, end - 1), 1);
+        expect(key + " blast" + i + " stops at end", fn(steps, end), 0);
+        expect(key + " blast" + i + " silent 1ms after stop", fn(steps, end + 1), 0);
+      }
+      start += s[1];
+    });
+    var silent = 0;
+    for (var t = 0; t < sumMs(steps); t += 500) if (fn(steps, t) === 0) silent++;
+    expect(key + " has silence in cycle", silent > 0, true);
+  });
+  var one = PRESETS["one-30"].steps;
+  expect("one-30 off at 15000", fn(one, 15000), 0);
+  expect("one-30 off at 29999", fn(one, 29999), 0);
+  return { fails: fails, count: count };
+}
+
+// One pure verdict: green only if the real rule passes everything and every broken twin is caught.
+function verdict(r) {
   var problems = [];
+  if (r.realStart.fails.length) problems.push("real rule failed " + r.realStart.fails.length + " start checks, e.g. " + r.realStart.fails[0]);
+  if (r.realStop.fails.length) problems.push("real rule failed " + r.realStop.fails.length + " stop checks, e.g. " + r.realStop.fails[0]);
+  if (r.offStart.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every start check");
+  if (r.offStop.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every stop check");
+  if (r.never.fails.length === 0) problems.push("CHECKER BROKEN: the never-stops copy passed every stop check");
+  return { ok: problems.length === 0, problems: problems };
+}
+
+function selfTest() {
+  var extra = [];
   var cycles = { "one-30":30000, "two-60":60000, "one-120":120000, "short-20":20000, "three-60":60000, "quick-5":5000 };
   KEYS.forEach(function (k) {
-    if (sumMs(PRESETS[k].steps) !== cycles[k]) problems.push(k + " cycle is " + sumMs(PRESETS[k].steps) + " ms, expected " + cycles[k]);
+    if (sumMs(PRESETS[k].steps) !== cycles[k]) extra.push(k + " cycle is " + sumMs(PRESETS[k].steps) + " ms, expected " + cycles[k]);
   });
-  var real = runChecks(stateAt);
-  var broken = runChecks(stateAtBroken);
-  real.fails.slice(0, 3).forEach(function (f) { problems.push("real rule: " + f); });
-  if (broken.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every check");
+  var r = {
+    realStart: runChecks(stateAt), realStop: runStopChecks(stateAt),
+    offStart: runChecks(stateAtBroken), offStop: runStopChecks(stateAtBroken),
+    never: runStopChecks(stateAtNeverStops)
+  };
+  var v = verdict(r);
+  // The verdict itself must be able to say no: feed it the broken copy as if it were the real one.
+  var fake = { realStart: r.offStart, realStop: r.offStop, offStart: r.offStart, offStop: r.offStop, never: r.never };
+  if (verdict(fake).ok) extra.push("VERDICT BROKEN: it accepted the broken copy as real");
+  var problems = v.problems.concat(extra);
   var ok = problems.length === 0;
   selftestEl.className = ok ? "pass" : "fail";
-  selftestEl.textContent = ok
-    ? "Self-test PASS: real rule passed " + real.count + " of " + real.count + " checks. The off-by-one copy failed " + broken.fails.length + " of " + broken.count + ", so the checker can catch a bug."
-    : "Self-test FAIL: " + problems.join("; ");
+  selftestEl.innerHTML = "";
+  var head = document.createElement("b");
+  head.textContent = ok ? "Self-test passed" : "Self-test FAILED";
+  var sm = document.createElement("span");
+  sm.textContent = ok
+    ? "Real rule: " + r.realStart.count + " start and " + r.realStop.count + " stop checks all green. Broken copies caught: off-by-one failed " + r.offStart.fails.length + " start and " + r.offStop.fails.length + " stop; never-stops failed " + r.never.fails.length + " of " + r.never.count + "."
+    : problems.join("; ");
+  selftestEl.appendChild(head);
+  selftestEl.appendChild(sm);
   return ok;
 }
 
-function announce(key, text) {      // say it once: only when the state changes
+function announce(key, text) {
   if (key === lastState) return;
   lastState = key;
   note.textContent = text;
@@ -290,7 +344,6 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
-// Copy the chosen preset's list into the walker and redraw the strip.
 function loadPreset() {
   var p = currentPreset();
   walker.steps = p.steps.map(function (s) { return [s[0], s[1]]; });
@@ -299,7 +352,6 @@ function loadPreset() {
   return p;
 }
 
-// Choosing a preset: copy its list into the walker, restart if it was running.
 function choose() {
   var p = loadPreset();
   if (walker.playing) start();
@@ -325,7 +377,7 @@ flashOn.addEventListener("change", function () {
 
 try { selfTest(); } catch (e) {
   selftestEl.className = "fail";
-  selftestEl.textContent = "Self-test FAIL: it crashed: " + e.message;
+  selftestEl.textContent = "Self-test FAILED: it crashed: " + e.message;
 }
 choose();
 })();
