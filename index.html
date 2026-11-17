@@ -45,6 +45,7 @@
 </style>
 </head>
 <body>
+<script data-bean-store>(function(){if(typeof location!=='undefined'&&location&&location.protocol==='about:'&&typeof document!=='undefined'&&document.addEventListener){document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href^="#"]');if(!a||a.target==='_blank')return;e.preventDefault();try{location.hash=a.getAttribute('href')}catch(x){}},true)}if(typeof window==='undefined')return;try{window.localStorage.getItem('x');return}catch(e){}var d=Object.assign({},window.__BEAN_SAVED||{});function post(){try{parent.postMessage({type:'bean-store',data:d},'*')}catch(e){}}var ls={getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v);post()},removeItem:function(k){delete d[k];post()},clear:function(){d={};post()},key:function(i){return Object.keys(d)[i]||null}};Object.defineProperty(ls,'length',{get:function(){return Object.keys(d).length}});try{Object.defineProperty(window,'localStorage',{value:ls,configurable:true})}catch(e){}})();</script>
 <main>
   <h1>Fog Signal Timer</h1>
   <p class="sub">Pick a timing. Hear it, watch it, or both, and see which one tells you more.</p>
@@ -93,6 +94,7 @@ var PRESETS = {
                 steps: [[1, 1000], [0, 4000]] }
 };
 var KEYS = Object.keys(PRESETS);
+var WINDUP_MS = 80, LAG_MS = 150;
 
 var $ = function (id) { return document.getElementById(id); };
 var select = $("preset"), go = $("go"), square = $("square"), strip = $("strip");
@@ -150,6 +152,30 @@ function stateAtNeverStops(steps, t) {
   }
   return 1;
 }
+
+// Wind-up / lag rule: a ramp finishes if it is no longer than the step it lives in (a tie finishes).
+function rampFits(stepMs, rampMs) { return rampMs <= stepMs; }
+function rampFitsBroken(stepMs, rampMs) { return rampMs < stepMs; }
+function runRampChecks(fn) {
+  var fails = [], count = 0;
+  function expect(name, got, want) {
+    count++;
+    if (got !== want) fails.push(name + " got " + got + " want " + want);
+  }
+  [["wind-up", WINDUP_MS], ["lag", LAG_MS]].forEach(function (p) {
+    var n = p[0], r = p[1];
+    expect(n + " step 1ms short", fn(r - 1, r), false);
+    expect(n + " step exact tie", fn(r, r), true);
+    expect(n + " step 1ms longer", fn(r + 1, r), true);
+  });
+  KEYS.forEach(function (key) {
+    PRESETS[key].steps.forEach(function (s, i) {
+      expect(key + " step" + i + " fits ramp", fn(s[1], s[0] ? WINDUP_MS : LAG_MS), true);
+    });
+  });
+  return { fails: fails, count: count };
+}
+
 function runChecks(fn) {
   var fails = [], count = 0;
   function expect(name, got, want) {
@@ -205,9 +231,11 @@ function verdict(r) {
   var problems = [];
   if (r.realStart.fails.length) problems.push("real rule failed " + r.realStart.fails.length + " start checks, e.g. " + r.realStart.fails[0]);
   if (r.realStop.fails.length) problems.push("real rule failed " + r.realStop.fails.length + " stop checks, e.g. " + r.realStop.fails[0]);
+  if (r.realRamp.fails.length) problems.push("real wind-up/lag rule failed " + r.realRamp.fails.length + " checks, e.g. " + r.realRamp.fails[0]);
   if (r.offStart.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every start check");
   if (r.offStop.fails.length === 0) problems.push("CHECKER BROKEN: the off-by-one copy passed every stop check");
   if (r.never.fails.length === 0) problems.push("CHECKER BROKEN: the never-stops copy passed every stop check");
+  if (r.offRamp.fails.length === 0) problems.push("CHECKER BROKEN: the wind-up/lag twin passed every tie check");
   return { ok: problems.length === 0, problems: problems };
 }
 
@@ -220,11 +248,12 @@ function selfTest() {
   var r = {
     realStart: runChecks(stateAt), realStop: runStopChecks(stateAt),
     offStart: runChecks(stateAtBroken), offStop: runStopChecks(stateAtBroken),
-    never: runStopChecks(stateAtNeverStops)
+    never: runStopChecks(stateAtNeverStops),
+    realRamp: runRampChecks(rampFits), offRamp: runRampChecks(rampFitsBroken)
   };
   var v = verdict(r);
-  // The verdict itself must be able to say no: feed it the broken copy as if it were the real one.
-  var fake = { realStart: r.offStart, realStop: r.offStop, offStart: r.offStart, offStop: r.offStop, never: r.never };
+  // The verdict itself must be able to say no: feed it the broken copies as if they were real.
+  var fake = { realStart: r.offStart, realStop: r.offStop, realRamp: r.offRamp, offStart: r.offStart, offStop: r.offStop, never: r.never, offRamp: r.offRamp };
   if (verdict(fake).ok) extra.push("VERDICT BROKEN: it accepted the broken copy as real");
   var problems = v.problems.concat(extra);
   var ok = problems.length === 0;
@@ -234,7 +263,7 @@ function selfTest() {
   head.textContent = ok ? "Self-test passed" : "Self-test FAILED";
   var sm = document.createElement("span");
   sm.textContent = ok
-    ? "Real rule: " + r.realStart.count + " start and " + r.realStop.count + " stop checks all green. Broken copies caught: off-by-one failed " + r.offStart.fails.length + " start and " + r.offStop.fails.length + " stop; never-stops failed " + r.never.fails.length + " of " + r.never.count + "."
+    ? "Real rule: " + r.realStart.count + " start, " + r.realStop.count + " stop and " + r.realRamp.count + " wind-up/lag checks all green. Broken copies caught: off-by-one failed " + r.offStart.fails.length + " start and " + r.offStop.fails.length + " stop; never-stops failed " + r.never.fails.length + " of " + r.never.count + "; wind-up/lag twin failed " + r.offRamp.fails.length + " of " + r.offRamp.count + "."
     : problems.join("; ");
   selftestEl.appendChild(head);
   selftestEl.appendChild(sm);
@@ -280,7 +309,7 @@ function tone(on) {
   var t = audio.ctx.currentTime, g = audio.gain.gain;
   g.cancelScheduledValues(t);
   g.setValueAtTime(g.value, t);
-  g.linearRampToValueAtTime(on && soundOn.checked ? 0.22 : 0, t + (on ? 0.08 : 0.15));
+  g.linearRampToValueAtTime(on && soundOn.checked ? 0.22 : 0, t + (on ? WINDUP_MS : LAG_MS) / 1000);
 }
 
 function show(on) {
