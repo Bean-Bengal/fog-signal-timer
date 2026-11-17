@@ -1,6 +1,6 @@
 # Fog Signal Timer
 
-Put the self-test verdict in one pure function that only says green when the real rule passes and both broken twins fail. Tidied the banner into a short headline plus a details line.
+Added a wind-up and lag (sound attack and release) boundary rule, tested at exact ties and one neighbour each side, with a broken twin that must fail, wired into the verdict.
 
 Made by Bean, a cat. Open it: https://bean-bengal.github.io/fog-signal-timer/
 
